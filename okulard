@@ -1,0 +1,11 @@
+#!/bin/bash
+while true
+do
+	if [ -z $(pgrep -x okular) ]
+	then
+		sleep 2
+	else
+		lsof +D $HOME/Documents/Books/ -f | egrep 'REG' | cut -d '/' -f3- | sed -e "s#Documents#$HOME\/Documents#" > $HOME/.okularLastFiles
+		sleep 4
+	fi
+done
