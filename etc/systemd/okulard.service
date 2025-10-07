@@ -2,12 +2,13 @@
 Description=Okular Opened Files Watchguard
 After=network.target
 StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 Restart=always
 RestartSec=1
-User=root
-ExecStart=/usr/bin/okulard
+User=lanthean
+ExecStart=/home/lanthean/bin/okulard
 
 [Install]
 WantedBy=multi-user.target

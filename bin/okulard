@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+# flatpack binary is not okular, but okular-bin
+BINARY="okular-bin"
+F_OPEN_FILES="open_files"
+files=""
+F_PREVIOUS_FILES="previous_files"
+previous_files=""
+OPEN_FILES_DIR="$HOME/.okular"
+OPEN_FILES_FILE="$OPEN_FILES_DIR/$F_OPEN_FILES"
+PREVIOUS_FILES_FILE="$OPEN_FILES_DIR/$F_PREVIOUS_FILES"
+SCRIPT_NAME="okulard"
+
+# Desktop file(s) the daemon can update to include last-open files in Exec=
+# the user's active desktop entry:
+DESKTOP_FILES=("$HOME/.local/share/applications/org.kde.okular.desktop")
+
+# Avoid creating an excessively long command line
+MAX_FILES_IN_DESKTOP=15
+
+# Base command from the upstream desktop entry (Flatpak)
+FLATPAK_BASE_CMD="/usr/bin/flatpak run org.kde.okular"
+
+# Update Exec= line to include last-open files while preserving %U
+update_desktop_exec() {
+  local current_files="$1"
+  [ -z "${current_files}" ] && return 0
+
+  local file_args=""
+  local count=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    # Include only existing regular files
+    if [ -f "$line" ]; then
+      # Escape embedded double quotes in file paths
+      esc_line=${line//\"/\\\"}
+      file_args+="\"$esc_line\" "
+      count=$((count+1))
+      [ $count -ge $MAX_FILES_IN_DESKTOP ] && break
+    fi
+  done <<< "$current_files"
+
+  [ -z "$file_args" ] && return 0
+
+  local new_exec_line="Exec=${FLATPAK_BASE_CMD} ${file_args}%U"
+  log_to_syslog "$new_exec_line"
+
+  for desktop in "${DESKTOP_FILES[@]}"; do
+    [ ! -f "$desktop" ] && continue
+    if grep -q '^Exec=' "$desktop"; then
+      if ! grep -Fxq "$new_exec_line" "$desktop"; then
+        tmp_file=$(mktemp)
+        awk -v repl="$new_exec_line" 'BEGIN{done=0} /^Exec=/{ if(!done){print repl; done=1; next}} {print}' "$desktop" > "$tmp_file" && mv "$tmp_file" "$desktop"
+      fi
+    else
+      echo "$new_exec_line" >> "$desktop"
+      log_to_syslog "Added Exec=$new_exec_line line to $desktop"
+    fi
+  done
+}
+
+# Function to log to syslog
+log_to_syslog() {
+    logger -t "$SCRIPT_NAME" "$1"
+}
+
+while true
+do
+  # Ensure the directory and files exist
+  [ ! -d "$OPEN_FILES_DIR" ] && mkdir -p "$OPEN_FILES_DIR"
+  [ ! -f "$OPEN_FILES_FILE" ] && : > "$OPEN_FILES_FILE"
+  [ ! -f "$PREVIOUS_FILES_FILE" ] && : > "$PREVIOUS_FILES_FILE"
+  # Read previous files
+  [ -f "$PREVIOUS_FILES_FILE" ] && previous_files=$(cat "$PREVIOUS_FILES_FILE")
+  
+  if ! pgrep -x "$BINARY" >/dev/null 2>&1
+  then
+    sleep 5
+  else
+    # this lsof takes some time and the file is empty for that time - not good
+    #lsof +D $HOME/ -b -w -F n 2>/dev/null | grep -F '.pdf' | awk '{print substr($0, 2)}' > $HOME/.okularLastFiles
+    # recursively, without blocking kernel functions, suppress warnings, output
+    # only file names (format is "n{file name}" strip the "n")
+  files=$(lsof +D "$HOME/" -b -w -F n 2>/dev/null | grep -E '\.pdf$' | awk '{print substr($0, 2)}')
+    #echo "result $?"
+    #[ -z "$files" ] && echo 'true' || echo 'false'
+    # this should prevent writing empty file while okular is being closed -
+    # probably some nasty race condition
+  if pgrep -x "$BINARY" >/dev/null 2>&1 && [[ -n "$files" ]]; then
+        echo "$files" > "$OPEN_FILES_FILE"
+        # Log to syslog only if files have changed
+        if [ "$files" != "$previous_files" ]; then
+            file_count=$(echo "$files" | wc -l)
+            log_to_syslog "Detected $file_count PDF file(s) open in Okular"
+            log_to_syslog "Files: $(echo "$files" | xargs -d $'\n')"
+            echo "$files" > "$PREVIOUS_FILES_FILE"
+            # Update desktop Exec= to include last-open files
+            update_desktop_exec "$files"
+        fi
+    fi
+    sleep 10
+  fi
+done

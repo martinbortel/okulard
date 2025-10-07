@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# System-wide installer for okulard (root only)
+# - Installs daemon to /usr/local/bin
+# - Creates systemd template service /etc/systemd/system/okulard@.service
+# - Provisions per-user desktop entries
+# - Enables/starts per-user instances okulard@user.service (optional)
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BIN_SRC="$REPO_DIR/bin/okulard"
+DESKTOP_SRC="$REPO_DIR/local/share/applications/org.kde.okular.desktop"
+
+print_usage() {
+  cat <<USAGE
+Usage (run as root):
+  $0 --users user1,user2   # system-wide install and enable per-user instances
+
+Options:
+  --users LIST      Comma-separated list of users to provision (desktop file) and enable service for
+  --no-start        Do not start/enable services automatically (install only)
+USAGE
+}
+
+USERS=""
+START_ENABLE=true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --users) USERS="${2:-}"; shift 2 ;;
+    --no-start) START_ENABLE=false; shift ;;
+    -h|--help) print_usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; print_usage; exit 1 ;;
+  esac
+done
+
+# Root required
+if [[ $EUID -ne 0 ]]; then
+  echo "ERROR: This installer must be run as root (system-wide only)." >&2
+  exit 1
+fi
+
+sanitize_desktop_exec() {
+  local src="$1" dst="$2"
+  local tmpfile
+  tmpfile=$(mktemp)
+  awk 'BEGIN{done=0} /^Exec=/{ if(!done){print "Exec=/usr/bin/flatpak run org.kde.okular %U"; done=1; next}} {print} END{ if(!done) print "Exec=/usr/bin/flatpak run org.kde.okular %U" }' \
+    "$src" > "$tmpfile"
+  install -m 0644 "$tmpfile" "$dst"
+  rm -f "$tmpfile"
+}
+
+install_system_wide() {
+  # Install binary system-wide
+  install -m 0755 "$BIN_SRC" /usr/local/bin/okulard
+
+  # Create systemd template service (per-user instance)
+  cat > /etc/systemd/system/okulard@.service <<EOF
+[Unit]
+Description=Okular Opened Files Watchguard (per-user instance)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=3
+User=%i
+ExecStart=/usr/local/bin/okulard
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload || true
+}
+
+install_system_wide
+
+# Provision specified users (desktop file) and enable/start instances
+IFS=',' read -r -a user_list <<< "$USERS"
+for u in "${user_list[@]}"; do
+  [[ -z "$u" ]] && continue
+  # Get home from passwd
+  home_dir=$(getent passwd "$u" | cut -d: -f6)
+  if [[ -z "$home_dir" || ! -d "$home_dir" ]]; then
+    echo "WARN: Skipping user '$u' (home not found)" >&2
+    continue
+  fi
+  # Install per-user desktop file
+  mkdir -p "$home_dir/.local/share/applications"
+  if [[ -f "$DESKTOP_SRC" ]]; then
+    sanitize_desktop_exec "$DESKTOP_SRC" "$home_dir/.local/share/applications/org.kde.okular.desktop"
+  fi
+  chown -R "$u:$u" "$home_dir/.local/share/applications" 2>/dev/null || true
+  # Optional: refresh desktop DB (no harm if missing)
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$home_dir/.local/share/applications" || true
+  fi
+  if $START_ENABLE; then
+    systemctl enable --now "okulard@${u}.service" || true
+  fi
+  systemctl restart okulard.service || true
+  echo "service restarted"
+done
+
+echo "System-wide installation complete."
+
+echo "Setup complete."
