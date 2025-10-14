@@ -189,8 +189,7 @@ Comment[vi]=Trình xem tài liệu vạn năng
 Comment[zh_CN]=通用文档查看器
 Comment[zh_TW]=通用文件檢視器
 # Exec is intentionally simple; the okulard daemon rewrites this to include last-open files.
-Exec=/usr/bin/flatpak run org.kde.okular /home/lanthean/Documents/work/docs/mco/MCO_R3.0-21.08_OMAN_B14.pdf /home/lanthean/Documents/work/docs/mco/MCO_R3.1-01.04_KIMAN_B13.pdf /home/lanthean/Documents/work/docs/mco/MCO_R3.1-01.06_PROVAPI_B16.pdf /home/lanthean/Documents/work/docs/mco/MCO_R3.1-01.04_PREPAID_B13.pdf /home/lanthean/Documents/work/docs/mco/MCO_R3.1-01.04_OMAN_B13.pdf /home/lanthean/Documents/work/docs/mco/MCO_R3.1-01.04_BIM_B13.pdf /home/lanthean/Documents/work/docs/mco/MCO_R3.1-01.04_IMAN_B13.pdf
-%U
+Exec=/usr/bin/flatpak run org.kde.okular %U
 Icon=org.kde.okular
 Type=Application
 X-DocPath=okular/index.html
