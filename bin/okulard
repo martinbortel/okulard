@@ -77,16 +77,26 @@ do
   then
     sleep 5
   else
-    # this lsof takes some time and the file is empty for that time - not good
-    #lsof +D $HOME/ -b -w -F n 2>/dev/null | grep -F '.pdf' | awk '{print substr($0, 2)}' > $HOME/.okularLastFiles
-    # recursively, without blocking kernel functions, suppress warnings, output
-    # only file names (format is "n{file name}" strip the "n")
-  files=$(lsof +D "$HOME/" -b -w -F n 2>/dev/null | grep -E '\.pdf$' | awk '{print substr($0, 2)}')
+    # Check /proc/PID/fd/ for okular-bin processes to get currently open files
+    files=""
+    for pid in $(pgrep -x "$BINARY" 2>/dev/null); do
+      if [[ -d "/proc/$pid/fd" ]]; then
+        # Read all file descriptors and filter for PDFs
+        pdf_files=$(find "/proc/$pid/fd/" -type l 2>/dev/null | \
+                   xargs readlink 2>/dev/null | \
+                   grep -E '\.pdf$' | \
+                   grep -v '/tmp/' | \
+                   sort -u)
+        if [[ -n "$pdf_files" ]]; then
+          files=$(echo -e "$files\n$pdf_files" | grep -v '^$' | sort -u)
+        fi
+      fi
+    done
     #echo "result $?"
     #[ -z "$files" ] && echo 'true' || echo 'false'
     # this should prevent writing empty file while okular is being closed -
     # probably some nasty race condition
-  if pgrep -x "$BINARY" >/dev/null 2>&1 && [[ -n "$files" ]]; then
+    if pgrep -x "$BINARY" >/dev/null 2>&1 && [[ -n "$files" ]]; then
         echo "$files" > "$OPEN_FILES_FILE"
         # Log to syslog only if files have changed
         if [ "$files" != "$previous_files" ]; then
