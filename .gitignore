@@ -1,0 +1,33 @@
+# Project gitignore for okulard
+
+# VS Code workspace files
+*.code-workspace
+.vscode/
+
+# User/session specific runtime data (not part of source)
+.okular/
+applications/
+
+# Logs
+*.log
+
+# Temporary / backup files
+*~
+*.swp
+*.swo
+
+# macOS / Windows cruft (in case contributors use those systems)
+.DS_Store
+Thumbs.db
+
+# Shell history or environment dumps (if accidentally added)
+.env
+
+# Systemd artifacts that might be copied locally
+*.service
+
+# Ignore generated desktop entries if recreated in repo root
+org.kde.okular.desktop
+
+# Any mktemp-style files
+/tmp/
