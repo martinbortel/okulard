@@ -11,12 +11,26 @@ OPEN_FILES_FILE="$OPEN_FILES_DIR/$F_OPEN_FILES"
 PREVIOUS_FILES_FILE="$OPEN_FILES_DIR/$F_PREVIOUS_FILES"
 SCRIPT_NAME="okulard"
 
+# Time (in seconds) between checks
+SLEEP_SECONDS=1
+
+# Minimum age (in seconds) a freshly started okular-bin process must have
+# before we trust its open file descriptors. Helps avoid writing a partial
+# list when Okular is still loading documents.
+GRACE_SECONDS=${GRACE_SECONDS:-3}
+
+# Time (in seconds) the collected file list must remain unchanged before
+# we persist it. Debounces rapid changes while documents are still opening.
+STABILIZE_SECONDS=${STABILIZE_SECONDS:-2}
+
+# Internal state for stabilization
+last_candidate_files=""
+last_change_epoch=0
+logged_grace_skip=0
+
 # Desktop file(s) the daemon can update to include last-open files in Exec=
 # the user's active desktop entry:
 DESKTOP_FILES=("$HOME/.local/share/applications/org.kde.okular.desktop")
-
-# Avoid creating an excessively long command line
-MAX_FILES_IN_DESKTOP=15
 
 # Base command from the upstream desktop entry (Flatpak)
 FLATPAK_BASE_CMD="/usr/bin/flatpak run org.kde.okular"
@@ -25,9 +39,9 @@ FLATPAK_BASE_CMD="/usr/bin/flatpak run org.kde.okular"
 update_desktop_exec() {
   local current_files="$1"
   [ -z "${current_files}" ] && return 0
-
+  local file_count=$(echo "$current_files" | wc -l)
   local file_args=""
-  local count=0
+  local logged_files="" # newline-separated list for logging
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     # Include only existing regular files
@@ -35,26 +49,34 @@ update_desktop_exec() {
       # Escape embedded double quotes in file paths
       esc_line=${line//\"/\\\"}
       file_args+="\"$esc_line\" "
-      count=$((count+1))
-      [ $count -ge $MAX_FILES_IN_DESKTOP ] && break
+      logged_files+="$line"$'\n'
     fi
   done <<< "$current_files"
 
   [ -z "$file_args" ] && return 0
 
   local new_exec_line="Exec=${FLATPAK_BASE_CMD} ${file_args}%U"
-  log_to_syslog "$new_exec_line"
+  # log_to_syslog "$new_exec_line"
 
+  # Update desktop files
   for desktop in "${DESKTOP_FILES[@]}"; do
     [ ! -f "$desktop" ] && continue
     if grep -q '^Exec=' "$desktop"; then
       if ! grep -Fxq "$new_exec_line" "$desktop"; then
         tmp_file=$(mktemp)
         awk -v repl="$new_exec_line" 'BEGIN{done=0} /^Exec=/{ if(!done){print repl; done=1; next}} {print}' "$desktop" > "$tmp_file" && mv "$tmp_file" "$desktop"
+        log_to_syslog " ---"
+        log_to_syslog "Detected $file_count PDF file(s) for exec line"
+        log_to_syslog "$desktop file updated (Exec=)"
+        # Log each file on its own line for clarity
+        while IFS= read -r f; do [ -n "$f" ] && log_to_syslog "  $f"; done <<< "$logged_files"
       fi
     else
       echo "$new_exec_line" >> "$desktop"
-      log_to_syslog "Added Exec=$new_exec_line line to $desktop"
+      log_to_syslog " ---"
+      log_to_syslog "Detected $file_count PDF file(s) for exec line"
+      log_to_syslog "$desktop file updated (Exec=)"
+      while IFS= read -r f; do [ -n "$f" ] && log_to_syslog "  $f"; done <<< "$logged_files"
     fi
   done
 }
@@ -66,6 +88,7 @@ log_to_syslog() {
 
 while true
 do
+  now_epoch=$(date +%s)
   # Ensure the directory and files exist
   [ ! -d "$OPEN_FILES_DIR" ] && mkdir -p "$OPEN_FILES_DIR"
   [ ! -f "$OPEN_FILES_FILE" ] && : > "$OPEN_FILES_FILE"
@@ -75,11 +98,22 @@ do
   
   if ! pgrep -x "$BINARY" >/dev/null 2>&1
   then
-    sleep 5
+    # Update desktop Exec= to include last-open files 
+    update_desktop_exec "$previous_files"
+    sleep $SLEEP_SECONDS
   else
     # Check /proc/PID/fd/ for okular-bin processes to get currently open files
     files=""
+    young_process_found=0
     for pid in $(pgrep -x "$BINARY" 2>/dev/null); do
+      # Determine process age using the mtime (creation time) of /proc/$pid
+      if [[ -d "/proc/$pid" ]]; then
+        start_epoch=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo 0)
+        age=$(( now_epoch - start_epoch ))
+        if (( age < GRACE_SECONDS )); then
+          young_process_found=1
+        fi
+      fi
       if [[ -d "/proc/$pid/fd" ]]; then
         # Read all file descriptors and filter for PDFs
         pdf_files=$(find "/proc/$pid/fd/" -type l 2>/dev/null | \
@@ -97,17 +131,43 @@ do
     # this should prevent writing empty file while okular is being closed -
     # probably some nasty race condition
     if pgrep -x "$BINARY" >/dev/null 2>&1 && [[ -n "$files" ]]; then
-        echo "$files" > "$OPEN_FILES_FILE"
-        # Log to syslog only if files have changed
-        if [ "$files" != "$previous_files" ]; then
-            file_count=$(echo "$files" | wc -l)
-            log_to_syslog "Detected $file_count PDF file(s) open in Okular"
-            log_to_syslog "Files: $(echo "$files" | xargs -d $'\n')"
-            echo "$files" > "$PREVIOUS_FILES_FILE"
-            # Update desktop Exec= to include last-open files
-            update_desktop_exec "$files"
+        # If any process is younger than GRACE_SECONDS, skip this cycle to
+        # allow Okular time to finish opening all requested documents.
+        if (( young_process_found )); then
+          if (( ! logged_grace_skip )); then
+            log_to_syslog " ---"
+            log_to_syslog "Skipping update (process younger than ${GRACE_SECONDS}s)"
+            logged_grace_skip=1
+          fi
+          sleep 1
+          continue
+        else
+          logged_grace_skip=0
+        fi
+
+        # Stabilization: Only write once the candidate set has stayed the same
+        # for STABILIZE_SECONDS. This avoids mid-load partial lists.
+        if [[ "$files" != "$last_candidate_files" ]]; then
+          last_candidate_files="$files"
+          last_change_epoch=$now_epoch
+          # Don't write yet, wait for stabilization window.
+        fi
+
+        stable_age=$(( now_epoch - last_change_epoch ))
+        if (( stable_age >= STABILIZE_SECONDS )); then
+          echo "$files" > "$OPEN_FILES_FILE"
+          if [ "$files" != "$previous_files" ]; then
+              file_count=$(echo "$files" | wc -l)
+              log_to_syslog " ---"
+              log_to_syslog "Detected $file_count PDF file(s) open in Okular (stable)"
+              # log_to_syslog "Files: $(echo "$files" | xargs -d $'\n')"
+              log_to_syslog "Files:"
+              while IFS= read -r f; do [ -n "$f" ] && log_to_syslog "  $f"; done <<< "$files"
+
+              echo "$files" > "$PREVIOUS_FILES_FILE"
+          fi
         fi
     fi
-    sleep 10
+    sleep $SLEEP_SECONDS
   fi
 done
